@@ -309,7 +309,7 @@ async def poll_browser_tabs(interval: int = 30):
     last_tabs_hash = None
     while True:
         try:
-            tabs = get_chrome_tabs() + get_safari_tabs()
+            tabs = get_chrome_tabs()
             tabs_hash = hash(json.dumps(tabs, sort_keys=True))
             if tabs and tabs_hash != last_tabs_hash:
                 await observation_queue.put({
@@ -375,7 +375,7 @@ async def initial_scan():
 
     # Initial browser snapshot
     try:
-        tabs = get_chrome_tabs() + get_safari_tabs()
+        tabs = get_chrome_tabs()
         if tabs:
             await observation_queue.put({
                 "event": "browser_snapshot",
