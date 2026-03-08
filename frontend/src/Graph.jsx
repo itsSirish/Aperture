@@ -140,11 +140,12 @@ export default function Graph({ nodes, links, onNodeClick }) {
       }
     }
 
-    const allLinks = [...(links || []).map(l => ({
-      source: l.source,
-      target: l.target,
-      strength: 0.8,
-    })), ...autoLinks];
+    // Only use links where source/target are valid node IDs
+    const nodeIds = new Set(nodes.map(n => n.id));
+    const backendLinks = (links || [])
+      .filter(l => nodeIds.has(l.source) && nodeIds.has(l.target))
+      .map(l => ({ source: l.source, target: l.target, strength: 0.8 }));
+    const allLinks = [...backendLinks, ...autoLinks];
 
     // Assign cluster positions
     nodes.forEach((n) => {
