@@ -214,6 +214,10 @@ export default function Graph({ nodes, links, onNodeClick }) {
 
     if (!hasNew && stateRef.current.settled) {
       stateRef.current.nodes = merged;
+      // Keep render loop alive even when settled
+      if (!frameRef.current) {
+        frameRef.current = requestAnimationFrame(draw);
+      }
       return;
     }
 
@@ -237,13 +241,10 @@ export default function Graph({ nodes, links, onNodeClick }) {
     sim.on("end", () => { stateRef.current.settled = true; });
     simRef.current = sim;
 
-    // Start render loop
-    if (frameRef.current) cancelAnimationFrame(frameRef.current);
-    frameRef.current = requestAnimationFrame(draw);
-
-    return () => {
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
-    };
+    // Start render loop (only if not already running)
+    if (!frameRef.current) {
+      frameRef.current = requestAnimationFrame(draw);
+    }
   }, [nodes, links, draw]);
 
   // Mouse interaction
