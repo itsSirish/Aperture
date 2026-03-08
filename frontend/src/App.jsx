@@ -4,8 +4,8 @@ import NodeInspector from "./NodeInspector";
 import VoiceIndicator from "./VoiceIndicator";
 import { useBeliefGraph } from "./useFirestore";
 
-const BACKEND_WS =
-  process.env.REACT_APP_BACKEND_WS || "ws://localhost:8080/ws";
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8080";
+const BACKEND_WS = BACKEND_URL.replace("https://", "wss://").replace("http://", "ws://") + "/ws";
 
 export default function App() {
   const { nodes, links, loading } = useBeliefGraph();
