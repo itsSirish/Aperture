@@ -16,20 +16,52 @@ class FirestoreClient:
     async def add_belief(
         self, statement: str, confidence: float, evidence: list, node_type: str
     ) -> str:
-        ref = self.beliefs_col.document()
-        await ref.set(
-            {
-                "statement": statement,
-                "confidence": confidence,
-                "evidence": evidence,
-                "node_type": node_type,
-                "created_at": firestore.SERVER_TIMESTAMP,
-                "session_id": self._current_session_id(),
-            }
+        """Upsert: if a belief with the same statement+node_type exists, update it instead."""
+        existing = (
+            await self.beliefs_col
+            .where("statement", "==", statement)
+            .where("node_type", "==", node_type)
+            .limit(1)
+            .get()
         )
-        return ref.id
+        if existing:
+            doc = existing[0]
+            old_data = doc.to_dict()
+            # Merge evidence, bump confidence
+            merged_evidence = list(set((old_data.get("evidence") or []) + evidence))
+            new_confidence = min(1.0, max(confidence, old_data.get("confidence", 0)))
+            await doc.reference.update({
+                "confidence": new_confidence,
+                "evidence": merged_evidence,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            })
+            return doc.id
+        else:
+            ref = self.beliefs_col.document()
+            await ref.set(
+                {
+                    "statement": statement,
+                    "confidence": confidence,
+                    "evidence": evidence,
+                    "node_type": node_type,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "session_id": self._current_session_id(),
+                }
+            )
+            return ref.id
 
     async def add_edge(self, source: str, target: str, relationship: str):
+        """Upsert edge: skip if same source→target→relationship already exists."""
+        existing = (
+            await self.edges_col
+            .where("source", "==", source)
+            .where("target", "==", target)
+            .where("relationship", "==", relationship)
+            .limit(1)
+            .get()
+        )
+        if existing:
+            return  # edge already exists
         await self.edges_col.add(
             {
                 "source": source,

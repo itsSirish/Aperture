@@ -102,13 +102,18 @@ class CortexSession:
 
         elif event == "browser_snapshot":
             tabs = data.get("tabs", [])
-            # Use Gemini to smart-cluster tabs into topics
+            # Deduplicate tabs by URL
+            seen_urls = set()
             tab_list = []
             for tab in tabs:
                 url = tab.get("url", "")
                 title = tab.get("title", "")
                 if not url or url.startswith("chrome") or not title:
                     continue
+                # Skip duplicates and internal pages
+                if url in seen_urls or "newtab" in url or "extensions" in url:
+                    continue
+                seen_urls.add(url)
                 tab_list.append({"url": url, "title": title})
 
             if tab_list:
@@ -162,11 +167,18 @@ class CortexSession:
     async def _smart_cluster_tabs(self, tabs):
         """Use Gemini to group browser tabs into meaningful topics."""
         import json
-        tab_summary = "\n".join([f"- {t['title']} ({t['url'][:60]})" for t in tabs[:40]])
+        tab_summary = "\n".join([f"- {t['title'][:60]} ({t['url'][:50]})" for t in tabs[:40]])
 
         prompt = f"""Group these browser tabs into 3-6 meaningful topic clusters.
-Each cluster should have a short name (2-4 words) and list which tabs belong to it.
-Ignore generic/utility tabs (new tab, settings, extensions).
+Each cluster needs:
+- "topic": short name (2-4 words) describing the activity
+- "tabs": array of objects with "short_title" (max 30 chars, clean readable name) and "url"
+
+RULES:
+- Merge duplicate/similar pages into ONE entry (e.g. multiple Google search results = 1 "Google Search" entry)
+- Ignore generic tabs: new tab, settings, extensions, blank pages
+- If 3+ tabs share a domain, group them as one entry like "GitHub (4 repos)"
+- Max 5 tabs per cluster. Summarize the rest as "N more"
 
 TABS:
 {tab_summary}
@@ -175,11 +187,14 @@ OUTPUT as JSON array:
 [
   {{
     "topic": "Job Search",
-    "tabs": ["tab title 1", "tab title 2"]
+    "tabs": [
+      {{"short_title": "LinkedIn Jobs", "url": "https://linkedin.com/jobs"}},
+      {{"short_title": "Glassdoor Reviews", "url": "https://glassdoor.com"}}
+    ]
   }}
 ]
 
-Return ONLY JSON. No markdown. Max 6 clusters. Skip tabs that don't fit any topic."""
+Return ONLY valid JSON. No markdown. No explanation."""
 
         try:
             response = await self.belief_engine.client.aio.models.generate_content(
@@ -197,7 +212,7 @@ Return ONLY JSON. No markdown. Max 6 clusters. Skip tabs that don't fit any topi
                 if not topic or not cluster_tabs:
                     continue
 
-                # Create topic node
+                # Create topic node (upsert handles dedup)
                 topic_id = await self.db.add_belief(
                     statement=topic,
                     confidence=0.9,
@@ -206,26 +221,26 @@ Return ONLY JSON. No markdown. Max 6 clusters. Skip tabs that don't fit any topi
                 )
 
                 # Create tab nodes under the topic
-                for tab_title in cluster_tabs[:6]:
-                    # Find the URL
-                    url = ""
-                    for t in tabs:
-                        if t["title"] == tab_title:
-                            url = t["url"]
-                            break
-                    if len(tab_title) > 50:
-                        tab_title = tab_title[:50] + "..."
+                for tab_info in cluster_tabs[:5]:
+                    if isinstance(tab_info, str):
+                        title = tab_info[:30]
+                        url = ""
+                    else:
+                        title = tab_info.get("short_title", tab_info.get("title", ""))[:30]
+                        url = tab_info.get("url", "")
+                    if not title:
+                        continue
                     tab_id = await self.db.add_belief(
-                        statement=tab_title,
+                        statement=title,
                         confidence=0.6,
-                        evidence=[url],
+                        evidence=[url] if url else [],
                         node_type="tab",
                     )
                     await self.db.add_edge(tab_id, topic_id, "part_of")
 
         except Exception as e:
             print(f"[CortexSession] Tab clustering error: {e}")
-            # Fallback: just store domains
+            # Fallback: group by domain
             domains = {}
             for t in tabs:
                 try:
