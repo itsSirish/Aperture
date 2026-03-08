@@ -97,7 +97,7 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           {/* Node count */}
           <span style={{ fontSize: 12, color: "#8b949e" }}>
-            {nodes.length} beliefs
+            {nodes.length} nodes
           </span>
 
           {/* Connection status */}
@@ -118,11 +118,10 @@ export default function App() {
           {/* Legend */}
           <div style={{ display: "flex", gap: 10, marginLeft: 8 }}>
             {[
-              { type: "work", color: "#4af0b0" },
-              { type: "intent", color: "#c04af0" },
-              { type: "contact", color: "#f0c14a" },
-              { type: "project", color: "#4a9ef0" },
-              { type: "behavior", color: "#f04a8d" },
+              { type: "files", color: "#4af0b0" },
+              { type: "browser", color: "#4a9ef0" },
+              { type: "notes", color: "#f0c14a" },
+              { type: "apps", color: "#c04af0" },
             ].map(({ type, color }) => (
               <div
                 key={type}

@@ -29,146 +29,193 @@ class CortexSession:
         self.running = True
         print("[CortexSession] Session started")
 
-        # Run observation processing and client receiving independently
-        # Gemini Live is optional — beliefs work without it
         await asyncio.gather(
             self._receive_from_client(),
-            self._belief_formation_loop(),
+            self._process_observations_loop(),
             self._gemini_live_loop(),
         )
 
     async def _receive_from_client(self):
-        """Receive observations and audio from the WebSocket client."""
         try:
             async for message in self.ws.iter_json():
                 msg_type = message.get("type")
 
                 if msg_type == "observation":
-                    self.observation_buffer.append(message["data"])
-                    print(f"[CortexSession] Observation received: {message['data'].get('event', 'unknown')}")
+                    data = message["data"]
+                    event = data.get("event", "")
+                    print(f"[CortexSession] Observation: {event}")
+
+                    # Store concrete items directly as nodes
+                    await self._store_observation(data)
+
+                    # Also buffer for belief synthesis
+                    self.observation_buffer.append(data)
 
                 elif msg_type == "audio" and self.live_session:
                     audio_data = base64.b64decode(message["data"])
                     try:
                         await self.live_session.send(
                             types.LiveClientRealtimeInput(
-                                media_chunks=[
-                                    types.Blob(
-                                        data=audio_data,
-                                        mime_type="audio/pcm;rate=16000",
-                                    )
-                                ]
+                                media_chunks=[types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")]
                             )
                         )
                     except Exception as e:
                         print(f"[CortexSession] Audio send error: {e}")
 
-                elif msg_type == "screen_frame" and self.live_session:
-                    image_data = base64.b64decode(message["data"])
-                    try:
-                        await self.live_session.send(
-                            types.LiveClientRealtimeInput(
-                                media_chunks=[
-                                    types.Blob(
-                                        data=image_data,
-                                        mime_type="image/jpeg",
-                                    )
-                                ]
-                            )
-                        )
-                    except Exception as e:
-                        print(f"[CortexSession] Screen send error: {e}")
-
         except Exception as e:
             print(f"[CortexSession] Client receive error: {e}")
             self.running = False
 
-    async def _belief_formation_loop(self):
-        """Every 30 seconds, process observation buffer into beliefs.
-        This runs INDEPENDENTLY of Gemini Live."""
-        # Process first batch quickly (after 5 seconds)
-        first_run = True
-        while self.running:
-            wait_time = 5 if first_run else 30
-            first_run = False
-            await asyncio.sleep(wait_time)
+    async def _store_observation(self, data):
+        """Store raw observations as concrete graph nodes — files, tabs, notes, music, apps."""
+        event = data.get("event", "")
 
-            if not self.observation_buffer:
-                continue
+        if event == "directory_scan":
+            directory = data.get("directory", "")
+            files = data.get("files", [])
+            # Store the directory as a node
+            folder_name = directory.split("/")[-1] if "/" in directory else directory
+            dir_id = await self.db.add_belief(
+                statement=folder_name,
+                confidence=1.0,
+                evidence=[directory],
+                node_type="folder",
+            )
+            # Store individual files
+            for f in files[:30]:  # cap per directory
+                file_id = await self.db.add_belief(
+                    statement=f.get("name", ""),
+                    confidence=0.5 + min(f.get("size_kb", 0) / 500, 0.5),
+                    evidence=[f.get("path", ""), f.get("extension", ""), f"{f.get('size_kb', 0)}KB"],
+                    node_type="file",
+                )
+                await self.db.add_edge(file_id, dir_id, "inside")
 
-            batch = self.observation_buffer.copy()
-            self.observation_buffer.clear()
-            print(f"[CortexSession] Processing {len(batch)} observations...")
-
-            try:
-                beliefs = await self.belief_engine.process_observation_batch(batch)
-                print(f"[CortexSession] Formed {len(beliefs)} beliefs")
-
-                for belief in beliefs:
-                    node_id = await self.db.add_belief(
-                        belief["statement"],
-                        belief["confidence"],
-                        belief["evidence"],
-                        belief["node_type"],
-                    )
-
-                    for target_id in belief.get("connect_to", []):
-                        if target_id:
-                            await self.db.add_edge(
-                                node_id, target_id, "related_to"
-                            )
-
-                # Save session snapshot
-                if beliefs:
-                    tab_urls = [
-                        o.get("url", "")
-                        for o in batch
-                        if o.get("event") in ("tab_visit", "browser_snapshot")
-                    ]
-                    # Also extract URLs from browser_snapshot tabs
-                    for o in batch:
-                        if o.get("event") == "browser_snapshot":
-                            for tab in o.get("tabs", []):
-                                tab_urls.append(tab.get("url", ""))
-
-                    await self.db.save_session(
-                        {
-                            "summary": " | ".join(
-                                b["statement"] for b in beliefs[:5]
-                            ),
-                            "tabs": tab_urls[:20],
-                            "files": [
-                                o.get("path", "")
-                                for o in batch
-                                if o.get("event") in ("file_modified", "file_created")
-                            ],
-                        }
-                    )
-
-                # Notify frontend
+        elif event == "browser_snapshot":
+            tabs = data.get("tabs", [])
+            # Group tabs by domain
+            domains = {}
+            for tab in tabs:
+                url = tab.get("url", "")
+                title = tab.get("title", "")
+                if not url or url.startswith("chrome"):
+                    continue
                 try:
-                    await self.ws.send_json(
-                        {"type": "graph_update", "beliefs": beliefs}
-                    )
-                except Exception:
-                    pass
+                    domain = url.split("//")[1].split("/")[0].replace("www.", "")
+                except (IndexError, AttributeError):
+                    domain = url
+                if domain not in domains:
+                    domains[domain] = []
+                domains[domain].append({"url": url, "title": title})
 
-            except Exception as e:
-                print(f"[CortexSession] Belief formation error: {e}")
+            for domain, tabs_list in domains.items():
+                # Store domain as a node
+                domain_id = await self.db.add_belief(
+                    statement=domain,
+                    confidence=min(0.5 + len(tabs_list) * 0.15, 1.0),
+                    evidence=[t["url"] for t in tabs_list[:5]],
+                    node_type="domain",
+                )
+                # Store individual tabs under the domain
+                for tab in tabs_list[:5]:
+                    title = tab.get("title", "")
+                    if len(title) > 60:
+                        title = title[:60] + "..."
+                    tab_id = await self.db.add_belief(
+                        statement=title,
+                        confidence=0.6,
+                        evidence=[tab["url"]],
+                        node_type="tab",
+                    )
+                    await self.db.add_edge(tab_id, domain_id, "on_site")
+
+        elif event == "notes_scan":
+            notes = data.get("notes", [])
+            for note_title in notes:
+                if note_title:
+                    await self.db.add_belief(
+                        statement=note_title,
+                        confidence=0.7,
+                        evidence=["apple_notes"],
+                        node_type="note",
+                    )
+
+        elif event == "music_playing":
+            track = data.get("track", "")
+            artist = data.get("artist", "")
+            if track:
+                await self.db.add_belief(
+                    statement=f"{track} — {artist}",
+                    confidence=0.8,
+                    evidence=[data.get("album", ""), "now_playing"],
+                    node_type="music",
+                )
+
+        elif event == "app_focus":
+            app = data.get("app", "")
+            window = data.get("window", "")
+            if app and app not in ("Finder", "loginwindow", "Dock", "SystemUIServer"):
+                await self.db.add_belief(
+                    statement=f"{app}: {window}" if window else app,
+                    confidence=0.6,
+                    evidence=["app_focus"],
+                    node_type="app",
+                )
+
+        elif event in ("file_modified", "file_created"):
+            name = data.get("name", "")
+            path = data.get("path", "")
+            if name:
+                await self.db.add_belief(
+                    statement=name,
+                    confidence=0.8,
+                    evidence=[path, event],
+                    node_type="file",
+                )
+
+        elif event == "tab_visit":
+            title = data.get("title", "")
+            url = data.get("url", "")
+            if title:
+                await self.db.add_belief(
+                    statement=title[:60],
+                    confidence=0.6,
+                    evidence=[url],
+                    node_type="tab",
+                )
+
+    async def _process_observations_loop(self):
+        """Periodically run belief synthesis for higher-level insights."""
+        while self.running:
+            await asyncio.sleep(120)  # every 2 minutes
+            if len(self.observation_buffer) >= 3:
+                batch = self.observation_buffer.copy()
+                self.observation_buffer.clear()
+                try:
+                    beliefs = await self.belief_engine.process_observation_batch(batch)
+                    print(f"[CortexSession] Synthesized {len(beliefs)} insights")
+                    for belief in beliefs:
+                        await self.db.add_belief(
+                            belief["statement"], belief["confidence"],
+                            belief["evidence"], belief["node_type"],
+                        )
+                except Exception as e:
+                    print(f"[CortexSession] Belief synthesis error: {e}")
 
     async def _gemini_live_loop(self):
-        """Optionally connect to Gemini Live for voice. Does NOT block beliefs."""
         profile = await self.db.get_profile()
         graph_digest = await self.db.get_graph_digest(max_tokens=400)
 
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=self._build_system_prompt(profile, graph_digest),
+            system_instruction=(
+                f"You are Cortex — ambient intelligence. Profile: {profile[:1500]}\n"
+                f"Graph: {graph_digest[:400]}\n"
+                "Speak only when you have something worth saying."
+            ),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Puck"
-                    )
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
                 )
             ),
         )
@@ -180,63 +227,26 @@ class CortexSession:
                 ) as live:
                     self.live_session = live
                     print("[CortexSession] Gemini Live connected")
-
-                    # Stream responses back to client
                     async for response in live.receive():
                         if not self.running:
                             break
                         if response.data:
                             try:
-                                await self.ws.send_json(
-                                    {
-                                        "type": "audio",
-                                        "data": base64.b64encode(
-                                            response.data
-                                        ).decode(),
-                                    }
-                                )
+                                await self.ws.send_json({
+                                    "type": "audio",
+                                    "data": base64.b64encode(response.data).decode(),
+                                })
                             except Exception:
                                 break
                         if response.text:
                             try:
-                                await self.ws.send_json(
-                                    {"type": "transcript", "text": response.text}
-                                )
+                                await self.ws.send_json({"type": "transcript", "text": response.text})
                             except Exception:
                                 break
-
             except Exception as e:
                 self.live_session = None
-                print(f"[CortexSession] Gemini Live error (beliefs still working): {e}")
-                await asyncio.sleep(5)
-
-                # Refresh context
-                try:
-                    profile = await self.db.get_profile()
-                    graph_digest = await self.db.get_graph_digest(max_tokens=400)
-                    config = types.LiveConnectConfig(
-                        response_modalities=["AUDIO"],
-                        system_instruction=self._build_system_prompt(
-                            profile, graph_digest
-                        ),
-                        speech_config=types.SpeechConfig(
-                            voice_config=types.VoiceConfig(
-                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                    voice_name="Puck"
-                                )
-                            )
-                        ),
-                    )
-                except Exception:
-                    pass
-
-    def _build_system_prompt(self, profile: str, graph_digest: str) -> str:
-        return (
-            f"You are Cortex — ambient intelligence. Profile: {profile[:1500]}\n"
-            f"Graph: {graph_digest[:400]}\n"
-            "Speak only when you have something worth saying. "
-            "When you speak unprompted, it must feel like you read the user's mind."
-        )
+                print(f"[CortexSession] Gemini Live error (graph still working): {e}")
+                await asyncio.sleep(10)
 
     async def cleanup(self):
         self.running = False

@@ -1,41 +1,39 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useCallback } from "react";
 import * as d3 from "d3";
 
 const NODE_COLORS = {
-  work: "#4af0b0", contact: "#f0c14a", project: "#4a9ef0", behavior: "#f04a8d",
-  intent: "#c04af0", career: "#f0c14a", event: "#4a9ef0", interest: "#c04af0",
-  resource: "#4af0b0", tool: "#f09a4a", research: "#c04af0", activity: "#4af0b0",
-  task: "#f04a8d",
+  file: "#4af0b0", folder: "#3dd69e", tab: "#4a9ef0", domain: "#1a73e8",
+  note: "#f0c14a", music: "#f04a8d", app: "#c04af0", intent: "#c04af0",
+  project: "#4a9ef0", career: "#f0c14a", tool: "#f09a4a", research: "#c04af0",
+  work: "#4af0b0", contact: "#f0c14a", event: "#4a9ef0", interest: "#c04af0",
+  resource: "#4af0b0", activity: "#4af0b0", task: "#f04a8d", behavior: "#f04a8d",
 };
 
 const CLUSTERS = [
-  { id: 0, label: "Work", types: ["project", "work", "activity", "task"], color: "#4a9ef0" },
-  { id: 1, label: "Intent", types: ["intent", "interest", "research"], color: "#c04af0" },
-  { id: 2, label: "Career", types: ["career", "contact", "event"], color: "#f0c14a" },
-  { id: 3, label: "Tools", types: ["tool", "resource", "behavior"], color: "#f09a4a" },
+  { id: 0, label: "Files", types: ["file", "folder"], color: "#4af0b0" },
+  { id: 1, label: "Browser", types: ["tab", "domain"], color: "#4a9ef0" },
+  { id: 2, label: "Notes & Music", types: ["note", "music"], color: "#f0c14a" },
+  { id: 3, label: "Apps & Insights", types: ["app", "intent", "project", "career", "tool", "research", "work", "contact", "event", "interest", "resource", "activity", "task", "behavior"], color: "#c04af0" },
 ];
 
 const typeToCluster = {};
 CLUSTERS.forEach(c => c.types.forEach(t => { typeToCluster[t] = c.id; }));
 
 function clusterCenter(id, w, h) {
-  const r = Math.min(w, h) * 0.35; // bigger spread between clusters
+  const r = Math.min(w, h) * 0.32;
   const angle = (id / CLUSTERS.length) * Math.PI * 2 - Math.PI / 2;
   return { x: w / 2 + r * Math.cos(angle), y: h / 2 + r * Math.sin(angle) };
 }
 
-// Hash a string to a stable number for consistent sizing
-function hashStr(s) {
+function hashId(s) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return Math.abs(h);
 }
 
-// Give each node a unique stable radius based on its id + confidence
 function nodeRadius(d) {
-  const base = 4 + (hashStr(d.id) % 15); // 4–18 base from hash
-  const conf = (d.confidence || 0.5);
-  return base * (0.6 + conf * 0.8); // scale by confidence: 60%-140% of base
+  const base = 3 + (hashId(d.id) % 12);
+  return base * (0.5 + (d.confidence || 0.5) * 1.0);
 }
 
 function buildEdges(nodes) {
@@ -49,244 +47,246 @@ function buildEdges(nodes) {
     for (let j = i + 1; j < nodes.length; j++) {
       let s = 0;
       for (const w of nw[i]) if (nw[j].has(w)) s++;
-      if (s >= 2) edges.push({ source: nodes[i].id, target: nodes[j].id, weight: s });
+      if (s >= 1 && (typeToCluster[nodes[i].node_type] === typeToCluster[nodes[j].node_type])) {
+        edges.push({ source: i, target: j, weight: s });
+      }
     }
   }
   return edges;
 }
 
 export default function Graph({ nodes, links, onNodeClick }) {
-  const svgRef = useRef(null);
+  const canvasRef = useRef(null);
   const simRef = useRef(null);
-  const stateRef = useRef({ nodes: [], initialized: false, settled: false });
+  const stateRef = useRef({ nodes: [], edges: [], hovered: null, settled: false });
+  const tooltipRef = useRef(null);
+  const frameRef = useRef(null);
 
-  useEffect(() => {
-    if (!svgRef.current || nodes.length === 0) return;
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const dpr = window.devicePixelRatio || 1;
+    const state = stateRef.current;
 
-    const svg = d3.select(svgRef.current);
-    const w = window.innerWidth, h = window.innerHeight;
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.scale(dpr, dpr);
 
-    if (!stateRef.current.initialized) {
-      stateRef.current.initialized = true;
-      svg.selectAll("*").remove();
+    const sw = w / dpr, sh = h / dpr;
 
-      const defs = svg.append("defs");
-      const f = defs.append("filter").attr("id", "glow").attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%");
-      f.append("feGaussianBlur").attr("stdDeviation", "5").attr("result", "b");
-      const m = f.append("feMerge");
-      m.append("feMergeNode").attr("in", "b");
-      m.append("feMergeNode").attr("in", "SourceGraphic");
+    // Draw cluster zones
+    CLUSTERS.forEach(c => {
+      const pos = clusterCenter(c.id, sw, sh);
+      const r = Math.min(sw, sh) * 0.18;
 
-      // Softer glow for smaller nodes
-      const f2 = defs.append("filter").attr("id", "glow-soft").attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%");
-      f2.append("feGaussianBlur").attr("stdDeviation", "2").attr("result", "b");
-      const m2 = f2.append("feMerge");
-      m2.append("feMergeNode").attr("in", "b");
-      m2.append("feMergeNode").attr("in", "SourceGraphic");
+      // Zone circle
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = c.color + "06";
+      ctx.fill();
+      ctx.strokeStyle = c.color + "12";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
 
-      const g = svg.append("g").attr("class", "root");
-      g.append("g").attr("class", "cluster-zones");
-      g.append("g").attr("class", "edges");
-      g.append("g").attr("class", "nodes");
-      g.append("g").attr("class", "cluster-labels");
+      // Label
+      ctx.fillStyle = c.color + "18";
+      ctx.font = "800 24px Inter, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.letterSpacing = "4px";
+      ctx.fillText(c.label.toUpperCase(), pos.x, pos.y);
+    });
 
-      svg.call(d3.zoom().scaleExtent([0.25, 3]).on("zoom", e => g.attr("transform", e.transform)));
-      svg.on("click", () => onNodeClick && onNodeClick(null));
-
-      CLUSTERS.forEach(c => {
-        const pos = clusterCenter(c.id, w, h);
-
-        g.select(".cluster-zones").append("circle")
-          .attr("cx", pos.x).attr("cy", pos.y)
-          .attr("r", Math.min(w, h) * 0.16)
-          .attr("fill", c.color).attr("fill-opacity", 0.015)
-          .attr("stroke", c.color).attr("stroke-opacity", 0.04)
-          .attr("stroke-width", 1)
-          .attr("stroke-dasharray", "4,4");
-
-        g.select(".cluster-labels").append("text")
-          .attr("x", pos.x).attr("y", pos.y)
-          .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
-          .attr("fill", c.color).attr("fill-opacity", 0.1)
-          .attr("font-size", "28px").attr("font-weight", "800")
-          .attr("font-family", "Inter, system-ui, sans-serif")
-          .attr("letter-spacing", "6px")
-          .text(c.label.toUpperCase());
-      });
+    // Draw edges
+    for (const e of state.edges) {
+      const s = state.nodes[e.source];
+      const t = state.nodes[e.target];
+      if (!s || !t) continue;
+      const isHovered = state.hovered && (state.hovered.id === s.id || state.hovered.id === t.id);
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(t.x, t.y);
+      ctx.strokeStyle = isHovered
+        ? (NODE_COLORS[s.node_type] || "#4af0b0") + "50"
+        : (NODE_COLORS[s.node_type] || "#4af0b0") + "08";
+      ctx.lineWidth = isHovered ? 1.2 : 0.3;
+      ctx.stroke();
     }
 
-    const g = svg.select(".root");
+    // Draw nodes
+    for (const d of state.nodes) {
+      const r = nodeRadius(d);
+      const color = NODE_COLORS[d.node_type] || "#4af0b0";
+      const isHovered = state.hovered && state.hovered.id === d.id;
 
-    // Merge — preserve positions
+      // Outer glow
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, r * 2, 0, Math.PI * 2);
+      ctx.fillStyle = color + (isHovered ? "20" : "08");
+      ctx.fill();
+
+      // Main circle
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, isHovered ? r * 1.3 : r, 0, Math.PI * 2);
+      const alpha = isHovered ? "bb" : Math.round((0.25 + (d.confidence || 0.5) * 0.5) * 255).toString(16).padStart(2, "0");
+      ctx.fillStyle = color + alpha;
+      ctx.fill();
+
+      // Bright core
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, Math.max(1, r * 0.3), 0, Math.PI * 2);
+      ctx.fillStyle = color + "dd";
+      ctx.fill();
+    }
+
+    // Tooltip for hovered node
+    if (state.hovered) {
+      const d = state.hovered;
+      const r = nodeRadius(d);
+      const color = NODE_COLORS[d.node_type] || "#4af0b0";
+      const text = d.statement || "";
+      const short = text.length > 55 ? text.slice(0, 55) + "..." : text;
+      const type = (d.node_type || "").toUpperCase();
+      const conf = Math.round((d.confidence || 0) * 100) + "%";
+      const label = `${short}  ·  ${type}  ·  ${conf}`;
+
+      ctx.font = "10px Inter, system-ui, sans-serif";
+      const tw = ctx.measureText(label).width + 16;
+      const tx = d.x + r * 1.5 + 6;
+      const ty = d.y - 12;
+
+      // Background
+      ctx.fillStyle = "rgba(8,12,18,0.92)";
+      ctx.beginPath();
+      ctx.roundRect(tx, ty, tw, 22, 4);
+      ctx.fill();
+      ctx.strokeStyle = color + "40";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+
+      // Text
+      ctx.fillStyle = "#dde2ea";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, tx + 8, ty + 11);
+    }
+
+    ctx.restore();
+    frameRef.current = requestAnimationFrame(draw);
+  }, []);
+
+  // Setup canvas + simulation
+  useEffect(() => {
+    if (!canvasRef.current || nodes.length === 0) return;
+
+    const canvas = canvasRef.current;
+    const dpr = window.devicePixelRatio || 1;
+    const w = window.innerWidth, h = window.innerHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+
+    // Merge nodes — preserve positions
     const oldMap = new Map(stateRef.current.nodes.map(n => [n.id, n]));
-    const newIds = new Set(nodes.map(n => n.id));
-    const hasNewNodes = nodes.some(n => !oldMap.has(n.id));
+    const hasNew = nodes.some(n => !oldMap.has(n.id));
 
     const merged = nodes.map(n => {
       const old = oldMap.get(n.id);
       if (old) return { ...n, x: old.x, y: old.y, vx: 0, vy: 0 };
-      const cid = typeToCluster[n.node_type] ?? 0;
+      const cid = typeToCluster[n.node_type] ?? 3;
       const cc = clusterCenter(cid, w, h);
       return { ...n, x: cc.x + (Math.random() - 0.5) * 80, y: cc.y + (Math.random() - 0.5) * 80 };
     });
+
+    if (!hasNew && stateRef.current.settled) {
+      stateRef.current.nodes = merged;
+      return;
+    }
+
+    const edges = buildEdges(merged);
     stateRef.current.nodes = merged;
-
-    // If no new nodes and sim already settled, skip simulation restart
-    if (!hasNewNodes && stateRef.current.settled) return;
-
-    const auto = buildEdges(merged);
-    const nodeIds = new Set(merged.map(n => n.id));
-    const be = (links || []).filter(l => nodeIds.has(l.source) && nodeIds.has(l.target)).map(l => ({ ...l, weight: 3 }));
-    const allEdges = [...be, ...auto];
+    stateRef.current.edges = edges;
+    stateRef.current.settled = false;
 
     if (simRef.current) simRef.current.stop();
 
     const sim = d3.forceSimulation(merged)
-      .force("link", d3.forceLink(allEdges).id(d => d.id).distance(40).strength(0.03))
-      .force("charge", d3.forceManyBody().strength(-40))
-      .force("collision", d3.forceCollide(d => nodeRadius(d) + 4))
-      .force("cx", d3.forceX(d => clusterCenter(typeToCluster[d.node_type] ?? 0, w, h).x).strength(0.12))
-      .force("cy", d3.forceY(d => clusterCenter(typeToCluster[d.node_type] ?? 0, w, h).y).strength(0.12))
-      .alpha(hasNewNodes ? 0.15 : 0.05) // barely move if no new nodes
-      .alphaDecay(0.08) // settle FAST
-      .velocityDecay(0.75); // heavy damping — no jitter
+      .force("link", d3.forceLink(edges).distance(30).strength(0.02))
+      .force("charge", d3.forceManyBody().strength(-25))
+      .force("collision", d3.forceCollide(d => nodeRadius(d) + 2))
+      .force("cx", d3.forceX(d => clusterCenter(typeToCluster[d.node_type] ?? 3, w, h).x).strength(0.1))
+      .force("cy", d3.forceY(d => clusterCenter(typeToCluster[d.node_type] ?? 3, w, h).y).strength(0.1))
+      .alpha(hasNew ? 0.12 : 0.03)
+      .alphaDecay(0.1)
+      .velocityDecay(0.8);
 
+    sim.on("end", () => { stateRef.current.settled = true; });
     simRef.current = sim;
 
-    // Mark settled once simulation cools
-    sim.on("end", () => { stateRef.current.settled = true; });
+    // Start render loop
+    if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    frameRef.current = requestAnimationFrame(draw);
 
-    // ── Edges ──
-    const eSel = g.select(".edges").selectAll("line").data(allEdges, d => `${d.source?.id||d.source}-${d.target?.id||d.target}`);
-    eSel.exit().transition().duration(600).attr("stroke-opacity", 0).remove();
-    const eEnter = eSel.enter().append("line")
-      .attr("stroke", d => {
-        const src = merged.find(n => n.id === (d.source?.id || d.source));
-        return NODE_COLORS[src?.node_type] || "#4af0b0";
-      })
-      .attr("stroke-opacity", 0)
-      .attr("stroke-width", d => 0.2 + Math.min(d.weight, 4) * 0.15);
-    eEnter.transition().duration(1000).attr("stroke-opacity", d => 0.02 + Math.min(d.weight, 4) * 0.025);
-    const allE = eEnter.merge(eSel);
+    return () => {
+      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    };
+  }, [nodes, links, draw]);
 
-    // ── Nodes ──
-    const nSel = g.select(".nodes").selectAll("g.node").data(merged, d => d.id);
-    nSel.exit().transition().duration(600).attr("opacity", 0).remove();
+  // Mouse interaction
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    const nEnter = nSel.enter().append("g").attr("class", "node").attr("cursor", "pointer").attr("opacity", 0);
-    nEnter.transition().duration(800).delay((_, i) => Math.min(i * 25, 500)).attr("opacity", 1);
+    const getNode = (ex, ey) => {
+      for (let i = stateRef.current.nodes.length - 1; i >= 0; i--) {
+        const d = stateRef.current.nodes[i];
+        const dx = d.x - ex, dy = d.y - ey;
+        if (dx * dx + dy * dy < (nodeRadius(d) + 4) ** 2) return d;
+      }
+      return null;
+    };
 
-    // Outer glow circle
-    nEnter.append("circle").attr("class", "glow-ring")
-      .attr("r", d => nodeRadius(d) * 1.8)
-      .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
-      .attr("opacity", d => 0.03 + (d.confidence || 0.5) * 0.04)
-      .attr("filter", "url(#glow)");
+    const onMove = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const node = getNode(x, y);
+      stateRef.current.hovered = node;
+      canvas.style.cursor = node ? "pointer" : "default";
+    };
 
-    // Main blob
-    nEnter.append("circle").attr("class", "dot")
-      .attr("r", d => nodeRadius(d))
-      .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
-      .attr("opacity", d => 0.2 + (d.confidence || 0.5) * 0.4)
-      .attr("filter", "url(#glow-soft)");
+    const onClick = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const node = getNode(x, y);
+      if (onNodeClick) onNodeClick(node);
+    };
 
-    // Bright center
-    nEnter.append("circle").attr("class", "core")
-      .attr("r", d => Math.max(1.5, nodeRadius(d) * 0.25))
-      .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
-      .attr("opacity", 0.85);
+    canvas.addEventListener("mousemove", onMove);
+    canvas.addEventListener("click", onClick);
+    return () => {
+      canvas.removeEventListener("mousemove", onMove);
+      canvas.removeEventListener("click", onClick);
+    };
+  }, [onNodeClick]);
 
-    const allN = nEnter.merge(nSel);
+  // Cleanup
+  useEffect(() => () => {
+    if (simRef.current) simRef.current.stop();
+    if (frameRef.current) cancelAnimationFrame(frameRef.current);
+  }, []);
 
-    // Hover
-    allN
-      .on("mouseenter", function(_, d) {
-        const r = nodeRadius(d);
-        d3.select(this).select(".dot").transition().duration(200)
-          .attr("opacity", 0.7).attr("r", r * 1.3);
-        d3.select(this).select(".glow-ring").transition().duration(200)
-          .attr("opacity", 0.12);
-
-        g.select(".tooltip").remove();
-        const tip = g.append("g").attr("class", "tooltip")
-          .attr("transform", `translate(${d.x},${d.y})`)
-          .attr("opacity", 0);
-        tip.transition().duration(200).attr("opacity", 1);
-
-        const text = d.statement || "";
-        const short = text.length > 55 ? text.slice(0, 55) + "..." : text;
-        const type = (d.node_type || "").toUpperCase();
-        const conf = Math.round((d.confidence || 0) * 100) + "%";
-        const boxW = Math.max(short.length * 5.8, 100);
-        const offset = r * 1.4 + 8;
-
-        tip.append("rect")
-          .attr("x", offset).attr("y", -20)
-          .attr("width", boxW).attr("height", 32)
-          .attr("rx", 6)
-          .attr("fill", "rgba(8,12,18,0.94)")
-          .attr("stroke", NODE_COLORS[d.node_type] || "#4af0b0")
-          .attr("stroke-opacity", 0.25).attr("stroke-width", 0.5);
-
-        tip.append("text")
-          .attr("x", offset + 8).attr("y", -4)
-          .attr("fill", "#dde2ea").attr("font-size", "9.5px")
-          .attr("font-family", "Inter, system-ui, sans-serif")
-          .text(short);
-
-        tip.append("text")
-          .attr("x", offset + 8).attr("y", 9)
-          .attr("fill", NODE_COLORS[d.node_type] || "#4af0b0")
-          .attr("font-size", "7px").attr("opacity", 0.5)
-          .attr("font-family", "Inter, system-ui, sans-serif")
-          .text(`${type}  ·  ${conf}`);
-
-        allE.transition().duration(200).attr("stroke-opacity", e => {
-          const s = e.source?.id || e.source, t = e.target?.id || e.target;
-          return (s === d.id || t === d.id) ? 0.35 : 0.005;
-        }).attr("stroke-width", e => {
-          const s = e.source?.id || e.source, t = e.target?.id || e.target;
-          return (s === d.id || t === d.id) ? 1.2 : 0.2;
-        });
-      })
-      .on("mouseleave", function(_, d) {
-        const r = nodeRadius(d);
-        d3.select(this).select(".dot").transition().duration(400)
-          .attr("opacity", 0.2 + (d.confidence || 0.5) * 0.4).attr("r", r);
-        d3.select(this).select(".glow-ring").transition().duration(400)
-          .attr("opacity", 0.03 + (d.confidence || 0.5) * 0.04);
-        g.select(".tooltip").transition().duration(200).attr("opacity", 0).remove();
-        allE.transition().duration(400)
-          .attr("stroke-opacity", e => 0.02 + Math.min(e.weight, 4) * 0.025)
-          .attr("stroke-width", e => 0.2 + Math.min(e.weight, 4) * 0.15);
-      });
-
-    // Drag
-    allN.call(d3.drag()
-      .on("start", (e, d) => {
-        stateRef.current.settled = false;
-        if (!e.active) sim.alphaTarget(0.02).restart();
-        d.fx = d.x; d.fy = d.y;
-      })
-      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
-    );
-
-    allN.on("click", (e, d) => { e.stopPropagation(); onNodeClick && onNodeClick(d); });
-
-    // Smooth tick with requestAnimationFrame
-    sim.on("tick", () => {
-      allE.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-        .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-      allN.attr("transform", d => `translate(${d.x},${d.y})`);
-    });
-
-  }, [nodes, links, onNodeClick]);
-
-  useEffect(() => () => { if (simRef.current) simRef.current.stop(); }, []);
-
-  return <svg ref={svgRef} style={{
-    position: "absolute", top: 0, left: 0,
-    width: "100vw", height: "100vh", background: "#0a0e14",
-  }} />;
+  return (
+    <>
+      <canvas ref={canvasRef} style={{
+        position: "absolute", top: 0, left: 0,
+        width: "100vw", height: "100vh", background: "#0a0e14",
+      }} />
+      <div ref={tooltipRef} />
+    </>
+  );
 }
