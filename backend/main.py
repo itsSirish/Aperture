@@ -68,3 +68,10 @@ async def post_observation(observation: dict):
             belief["node_type"],
         )
     return {"beliefs_formed": len(beliefs)}
+
+
+@app.post("/reset")
+async def reset_graph():
+    """Clear all beliefs and edges to start fresh."""
+    await db.clear_all()
+    return {"status": "cleared"}

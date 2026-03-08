@@ -67,13 +67,12 @@ class CortexSession:
             self.running = False
 
     async def _store_observation(self, data):
-        """Store raw observations as concrete graph nodes — files, tabs, notes, music, apps."""
+        """Store raw observations as concrete graph nodes with smart grouping."""
         event = data.get("event", "")
 
         if event == "directory_scan":
             directory = data.get("directory", "")
             files = data.get("files", [])
-            # Store the directory as a node
             folder_name = directory.split("/")[-1] if "/" in directory else directory
             dir_id = await self.db.add_belief(
                 statement=folder_name,
@@ -81,57 +80,43 @@ class CortexSession:
                 evidence=[directory],
                 node_type="folder",
             )
-            # Store individual files
-            for f in files[:30]:  # cap per directory
-                file_id = await self.db.add_belief(
-                    statement=f.get("name", ""),
-                    confidence=0.5 + min(f.get("size_kb", 0) / 500, 0.5),
-                    evidence=[f.get("path", ""), f.get("extension", ""), f"{f.get('size_kb', 0)}KB"],
-                    node_type="file",
-                )
-                await self.db.add_edge(file_id, dir_id, "inside")
+            # Group files by extension
+            by_ext = {}
+            for f in files:
+                ext = f.get("extension", "").lower()
+                if ext not in by_ext:
+                    by_ext[ext] = []
+                by_ext[ext].append(f)
+
+            for ext, ext_files in by_ext.items():
+                # Only store top 5 biggest/most recent per extension
+                sorted_files = sorted(ext_files, key=lambda x: x.get("size_kb", 0), reverse=True)[:5]
+                for f in sorted_files:
+                    file_id = await self.db.add_belief(
+                        statement=f.get("name", ""),
+                        confidence=0.5 + min(f.get("size_kb", 0) / 500, 0.5),
+                        evidence=[f.get("path", ""), ext, f"{f.get('size_kb', 0)}KB"],
+                        node_type="file",
+                    )
+                    await self.db.add_edge(file_id, dir_id, "inside")
 
         elif event == "browser_snapshot":
             tabs = data.get("tabs", [])
-            # Group tabs by domain
-            domains = {}
+            # Use Gemini to smart-cluster tabs into topics
+            tab_list = []
             for tab in tabs:
                 url = tab.get("url", "")
                 title = tab.get("title", "")
-                if not url or url.startswith("chrome"):
+                if not url or url.startswith("chrome") or not title:
                     continue
-                try:
-                    domain = url.split("//")[1].split("/")[0].replace("www.", "")
-                except (IndexError, AttributeError):
-                    domain = url
-                if domain not in domains:
-                    domains[domain] = []
-                domains[domain].append({"url": url, "title": title})
+                tab_list.append({"url": url, "title": title})
 
-            for domain, tabs_list in domains.items():
-                # Store domain as a node
-                domain_id = await self.db.add_belief(
-                    statement=domain,
-                    confidence=min(0.5 + len(tabs_list) * 0.15, 1.0),
-                    evidence=[t["url"] for t in tabs_list[:5]],
-                    node_type="domain",
-                )
-                # Store individual tabs under the domain
-                for tab in tabs_list[:5]:
-                    title = tab.get("title", "")
-                    if len(title) > 60:
-                        title = title[:60] + "..."
-                    tab_id = await self.db.add_belief(
-                        statement=title,
-                        confidence=0.6,
-                        evidence=[tab["url"]],
-                        node_type="tab",
-                    )
-                    await self.db.add_edge(tab_id, domain_id, "on_site")
+            if tab_list:
+                await self._smart_cluster_tabs(tab_list)
 
         elif event == "notes_scan":
             notes = data.get("notes", [])
-            for note_title in notes:
+            for note_title in notes[:10]:
                 if note_title:
                     await self.db.add_belief(
                         statement=note_title,
@@ -154,11 +139,12 @@ class CortexSession:
         elif event == "app_focus":
             app = data.get("app", "")
             window = data.get("window", "")
-            if app and app not in ("Finder", "loginwindow", "Dock", "SystemUIServer"):
+            ignore = {"Finder", "loginwindow", "Dock", "SystemUIServer", "Control Center", "Window Server", "Spotlight"}
+            if app and app not in ignore:
                 await self.db.add_belief(
-                    statement=f"{app}: {window}" if window else app,
+                    statement=app,
                     confidence=0.6,
-                    evidence=["app_focus"],
+                    evidence=["app_focus", window or ""],
                     node_type="app",
                 )
 
@@ -173,15 +159,89 @@ class CortexSession:
                     node_type="file",
                 )
 
-        elif event == "tab_visit":
-            title = data.get("title", "")
-            url = data.get("url", "")
-            if title:
+    async def _smart_cluster_tabs(self, tabs):
+        """Use Gemini to group browser tabs into meaningful topics."""
+        import json
+        tab_summary = "\n".join([f"- {t['title']} ({t['url'][:60]})" for t in tabs[:40]])
+
+        prompt = f"""Group these browser tabs into 3-6 meaningful topic clusters.
+Each cluster should have a short name (2-4 words) and list which tabs belong to it.
+Ignore generic/utility tabs (new tab, settings, extensions).
+
+TABS:
+{tab_summary}
+
+OUTPUT as JSON array:
+[
+  {{
+    "topic": "Job Search",
+    "tabs": ["tab title 1", "tab title 2"]
+  }}
+]
+
+Return ONLY JSON. No markdown. Max 6 clusters. Skip tabs that don't fit any topic."""
+
+        try:
+            response = await self.belief_engine.client.aio.models.generate_content(
+                model="gemini-2.0-flash", contents=prompt
+            )
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1].replace("json", "").strip()
+
+            clusters = json.loads(raw)
+
+            for cluster in clusters:
+                topic = cluster.get("topic", "")
+                cluster_tabs = cluster.get("tabs", [])
+                if not topic or not cluster_tabs:
+                    continue
+
+                # Create topic node
+                topic_id = await self.db.add_belief(
+                    statement=topic,
+                    confidence=0.9,
+                    evidence=[f"{len(cluster_tabs)} tabs"],
+                    node_type="topic",
+                )
+
+                # Create tab nodes under the topic
+                for tab_title in cluster_tabs[:6]:
+                    # Find the URL
+                    url = ""
+                    for t in tabs:
+                        if t["title"] == tab_title:
+                            url = t["url"]
+                            break
+                    if len(tab_title) > 50:
+                        tab_title = tab_title[:50] + "..."
+                    tab_id = await self.db.add_belief(
+                        statement=tab_title,
+                        confidence=0.6,
+                        evidence=[url],
+                        node_type="tab",
+                    )
+                    await self.db.add_edge(tab_id, topic_id, "part_of")
+
+        except Exception as e:
+            print(f"[CortexSession] Tab clustering error: {e}")
+            # Fallback: just store domains
+            domains = {}
+            for t in tabs:
+                try:
+                    domain = t["url"].split("//")[1].split("/")[0].replace("www.", "")
+                except (IndexError, AttributeError):
+                    continue
+                if domain not in domains:
+                    domains[domain] = 0
+                domains[domain] += 1
+
+            for domain, count in list(domains.items())[:10]:
                 await self.db.add_belief(
-                    statement=title[:60],
-                    confidence=0.6,
-                    evidence=[url],
-                    node_type="tab",
+                    statement=domain,
+                    confidence=min(0.5 + count * 0.1, 1.0),
+                    evidence=[f"{count} tabs"],
+                    node_type="domain",
                 )
 
     async def _process_observations_loop(self):

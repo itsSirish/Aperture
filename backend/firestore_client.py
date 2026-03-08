@@ -172,5 +172,18 @@ class FirestoreClient:
         session_data["session_id"] = self._current_session_id()
         await ref.set(session_data)
 
+    async def clear_all(self):
+        """Delete all beliefs and edges to start fresh."""
+        # Delete all beliefs
+        beliefs = await self.beliefs_col.limit(500).get()
+        for doc in beliefs:
+            await doc.reference.delete()
+        # Delete all edges
+        edges = await self.edges_col.limit(500).get()
+        for doc in edges:
+            await doc.reference.delete()
+        # Clear profile
+        await self.profile_doc.delete()
+
     def _current_session_id(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H")

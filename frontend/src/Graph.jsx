@@ -3,15 +3,16 @@ import * as d3 from "d3";
 
 const NODE_COLORS = {
   file: "#4af0b0", folder: "#3dd69e", tab: "#4a9ef0", domain: "#1a73e8",
-  note: "#f0c14a", music: "#f04a8d", app: "#c04af0", intent: "#c04af0",
-  project: "#4a9ef0", career: "#f0c14a", tool: "#f09a4a", research: "#c04af0",
-  work: "#4af0b0", contact: "#f0c14a", event: "#4a9ef0", interest: "#c04af0",
-  resource: "#4af0b0", activity: "#4af0b0", task: "#f04a8d", behavior: "#f04a8d",
+  topic: "#6aa3f0", note: "#f0c14a", music: "#f04a8d", app: "#c04af0",
+  intent: "#c04af0", project: "#4a9ef0", career: "#f0c14a", tool: "#f09a4a",
+  research: "#c04af0", work: "#4af0b0", contact: "#f0c14a", event: "#4a9ef0",
+  interest: "#c04af0", resource: "#4af0b0", activity: "#4af0b0",
+  task: "#f04a8d", behavior: "#f04a8d",
 };
 
 const CLUSTERS = [
   { id: 0, label: "Files", types: ["file", "folder"], color: "#4af0b0" },
-  { id: 1, label: "Browser", types: ["tab", "domain"], color: "#4a9ef0" },
+  { id: 1, label: "Browser", types: ["tab", "domain", "topic"], color: "#4a9ef0" },
   { id: 2, label: "Notes & Music", types: ["note", "music"], color: "#f0c14a" },
   { id: 3, label: "Apps & Insights", types: ["app", "intent", "project", "career", "tool", "research", "work", "contact", "event", "interest", "resource", "activity", "task", "behavior"], color: "#c04af0" },
 ];
@@ -32,7 +33,9 @@ function hashId(s) {
 }
 
 function nodeRadius(d) {
-  const base = 3 + (hashId(d.id) % 12);
+  // Topic/folder nodes are bigger (they're sub-cluster centers)
+  const isParent = d.node_type === "topic" || d.node_type === "folder" || d.node_type === "domain";
+  const base = isParent ? 12 + (hashId(d.id) % 8) : 3 + (hashId(d.id) % 10);
   return base * (0.5 + (d.confidence || 0.5) * 1.0);
 }
 
