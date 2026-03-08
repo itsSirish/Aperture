@@ -97,7 +97,6 @@ export default function Graph({ nodes, links, onNodeClick }) {
       ctx.font = "800 24px Inter, system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.letterSpacing = "4px";
       ctx.fillText(c.label.toUpperCase(), pos.x, pos.y);
     });
 
@@ -162,7 +161,17 @@ export default function Graph({ nodes, links, onNodeClick }) {
       // Background
       ctx.fillStyle = "rgba(8,12,18,0.92)";
       ctx.beginPath();
-      ctx.roundRect(tx, ty, tw, 22, 4);
+      const rr = 4;
+      ctx.moveTo(tx + rr, ty);
+      ctx.lineTo(tx + tw - rr, ty);
+      ctx.arcTo(tx + tw, ty, tx + tw, ty + rr, rr);
+      ctx.lineTo(tx + tw, ty + 22 - rr);
+      ctx.arcTo(tx + tw, ty + 22, tx + tw - rr, ty + 22, rr);
+      ctx.lineTo(tx + rr, ty + 22);
+      ctx.arcTo(tx, ty + 22, tx, ty + 22 - rr, rr);
+      ctx.lineTo(tx, ty + rr);
+      ctx.arcTo(tx, ty, tx + rr, ty, rr);
+      ctx.closePath();
       ctx.fill();
       ctx.strokeStyle = color + "40";
       ctx.lineWidth = 0.5;
