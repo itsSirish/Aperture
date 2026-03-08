@@ -12,7 +12,15 @@ class CortexSession:
         self.ws = websocket
         self.db = db
         self.belief_engine = belief_engine
-        self.client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        project_id = os.environ.get("PROJECT_ID", "")
+        if project_id:
+            self.client = genai.Client(
+                vertexai=True,
+                project=project_id,
+                location=os.environ.get("REGION", "us-central1"),
+            )
+        else:
+            self.client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
         self.live_session = None
         self.running = False
         self.observation_buffer = []
@@ -168,7 +176,7 @@ class CortexSession:
         while self.running:
             try:
                 async with self.client.aio.live.connect(
-                    model="gemini-2.0-flash-exp", config=config
+                    model="gemini-2.0-flash-live-001", config=config
                 ) as live:
                     self.live_session = live
                     print("[CortexSession] Gemini Live connected")

@@ -8,7 +8,17 @@ from firestore_client import FirestoreClient
 class BeliefEngine:
     def __init__(self, db: FirestoreClient):
         self.db = db
-        self.client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+        # Use Vertex AI (project billing) if PROJECT_ID is set, otherwise API key
+        project_id = os.environ.get("PROJECT_ID", "")
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        if project_id:
+            self.client = genai.Client(
+                vertexai=True,
+                project=project_id,
+                location=os.environ.get("REGION", "us-central1"),
+            )
+        else:
+            self.client = genai.Client(api_key=api_key)
 
     async def process_observation_batch(self, observations: list[dict]) -> list[dict]:
         """
