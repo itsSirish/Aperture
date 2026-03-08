@@ -19,9 +19,23 @@ const typeToCluster = {};
 CLUSTERS.forEach(c => c.types.forEach(t => { typeToCluster[t] = c.id; }));
 
 function clusterCenter(id, w, h) {
-  const r = Math.min(w, h) * 0.25;
+  const r = Math.min(w, h) * 0.35; // bigger spread between clusters
   const angle = (id / CLUSTERS.length) * Math.PI * 2 - Math.PI / 2;
   return { x: w / 2 + r * Math.cos(angle), y: h / 2 + r * Math.sin(angle) };
+}
+
+// Hash a string to a stable number for consistent sizing
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+// Give each node a unique stable radius based on its id + confidence
+function nodeRadius(d) {
+  const base = 4 + (hashStr(d.id) % 15); // 4–18 base from hash
+  const conf = (d.confidence || 0.5);
+  return base * (0.6 + conf * 0.8); // scale by confidence: 60%-140% of base
 }
 
 function buildEdges(nodes) {
@@ -44,7 +58,7 @@ function buildEdges(nodes) {
 export default function Graph({ nodes, links, onNodeClick }) {
   const svgRef = useRef(null);
   const simRef = useRef(null);
-  const stateRef = useRef({ nodes: [], initialized: false });
+  const stateRef = useRef({ nodes: [], initialized: false, settled: false });
 
   useEffect(() => {
     if (!svgRef.current || nodes.length === 0) return;
@@ -52,17 +66,23 @@ export default function Graph({ nodes, links, onNodeClick }) {
     const svg = d3.select(svgRef.current);
     const w = window.innerWidth, h = window.innerHeight;
 
-    // First time setup
     if (!stateRef.current.initialized) {
       stateRef.current.initialized = true;
       svg.selectAll("*").remove();
 
       const defs = svg.append("defs");
       const f = defs.append("filter").attr("id", "glow").attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%");
-      f.append("feGaussianBlur").attr("stdDeviation", "4").attr("result", "b");
+      f.append("feGaussianBlur").attr("stdDeviation", "5").attr("result", "b");
       const m = f.append("feMerge");
       m.append("feMergeNode").attr("in", "b");
       m.append("feMergeNode").attr("in", "SourceGraphic");
+
+      // Softer glow for smaller nodes
+      const f2 = defs.append("filter").attr("id", "glow-soft").attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%");
+      f2.append("feGaussianBlur").attr("stdDeviation", "2").attr("result", "b");
+      const m2 = f2.append("feMerge");
+      m2.append("feMergeNode").attr("in", "b");
+      m2.append("feMergeNode").attr("in", "SourceGraphic");
 
       const g = svg.append("g").attr("class", "root");
       g.append("g").attr("class", "cluster-zones");
@@ -70,176 +90,195 @@ export default function Graph({ nodes, links, onNodeClick }) {
       g.append("g").attr("class", "nodes");
       g.append("g").attr("class", "cluster-labels");
 
-      // Zoom
-      svg.call(d3.zoom().scaleExtent([0.3, 3]).on("zoom", e => g.attr("transform", e.transform)));
+      svg.call(d3.zoom().scaleExtent([0.25, 3]).on("zoom", e => g.attr("transform", e.transform)));
       svg.on("click", () => onNodeClick && onNodeClick(null));
 
-      // Cluster center nodes (big label circles)
       CLUSTERS.forEach(c => {
         const pos = clusterCenter(c.id, w, h);
 
-        // Subtle zone
         g.select(".cluster-zones").append("circle")
           .attr("cx", pos.x).attr("cy", pos.y)
-          .attr("r", Math.min(w, h) * 0.15)
-          .attr("fill", c.color).attr("fill-opacity", 0.02)
-          .attr("stroke", c.color).attr("stroke-opacity", 0.06)
-          .attr("stroke-width", 1);
+          .attr("r", Math.min(w, h) * 0.16)
+          .attr("fill", c.color).attr("fill-opacity", 0.015)
+          .attr("stroke", c.color).attr("stroke-opacity", 0.04)
+          .attr("stroke-width", 1)
+          .attr("stroke-dasharray", "4,4");
 
-        // Cluster label
         g.select(".cluster-labels").append("text")
           .attr("x", pos.x).attr("y", pos.y)
           .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
-          .attr("fill", c.color).attr("fill-opacity", 0.15)
-          .attr("font-size", "22px").attr("font-weight", "700")
+          .attr("fill", c.color).attr("fill-opacity", 0.1)
+          .attr("font-size", "28px").attr("font-weight", "800")
           .attr("font-family", "Inter, system-ui, sans-serif")
-          .attr("letter-spacing", "4px")
+          .attr("letter-spacing", "6px")
           .text(c.label.toUpperCase());
       });
     }
 
     const g = svg.select(".root");
 
-    // Merge nodes — keep existing positions
+    // Merge — preserve positions
     const oldMap = new Map(stateRef.current.nodes.map(n => [n.id, n]));
+    const newIds = new Set(nodes.map(n => n.id));
+    const hasNewNodes = nodes.some(n => !oldMap.has(n.id));
+
     const merged = nodes.map(n => {
       const old = oldMap.get(n.id);
       if (old) return { ...n, x: old.x, y: old.y, vx: 0, vy: 0 };
       const cid = typeToCluster[n.node_type] ?? 0;
       const cc = clusterCenter(cid, w, h);
-      return { ...n, x: cc.x + (Math.random() - 0.5) * 60, y: cc.y + (Math.random() - 0.5) * 60 };
+      return { ...n, x: cc.x + (Math.random() - 0.5) * 80, y: cc.y + (Math.random() - 0.5) * 80 };
     });
     stateRef.current.nodes = merged;
 
-    // Edges
+    // If no new nodes and sim already settled, skip simulation restart
+    if (!hasNewNodes && stateRef.current.settled) return;
+
     const auto = buildEdges(merged);
     const nodeIds = new Set(merged.map(n => n.id));
     const be = (links || []).filter(l => nodeIds.has(l.source) && nodeIds.has(l.target)).map(l => ({ ...l, weight: 3 }));
     const allEdges = [...be, ...auto];
 
-    // Stop old sim
     if (simRef.current) simRef.current.stop();
 
-    // Simulation — very gentle
     const sim = d3.forceSimulation(merged)
-      .force("link", d3.forceLink(allEdges).id(d => d.id).distance(50).strength(0.05))
-      .force("charge", d3.forceManyBody().strength(-60))
-      .force("collision", d3.forceCollide(d => 8 + (d.confidence || 0.5) * 14))
-      .force("cx", d3.forceX(d => clusterCenter(typeToCluster[d.node_type] ?? 0, w, h).x).strength(0.06))
-      .force("cy", d3.forceY(d => clusterCenter(typeToCluster[d.node_type] ?? 0, w, h).y).strength(0.06))
-      .alpha(0.15).alphaDecay(0.04).velocityDecay(0.6);
+      .force("link", d3.forceLink(allEdges).id(d => d.id).distance(40).strength(0.03))
+      .force("charge", d3.forceManyBody().strength(-40))
+      .force("collision", d3.forceCollide(d => nodeRadius(d) + 4))
+      .force("cx", d3.forceX(d => clusterCenter(typeToCluster[d.node_type] ?? 0, w, h).x).strength(0.12))
+      .force("cy", d3.forceY(d => clusterCenter(typeToCluster[d.node_type] ?? 0, w, h).y).strength(0.12))
+      .alpha(hasNewNodes ? 0.15 : 0.05) // barely move if no new nodes
+      .alphaDecay(0.08) // settle FAST
+      .velocityDecay(0.75); // heavy damping — no jitter
+
     simRef.current = sim;
+
+    // Mark settled once simulation cools
+    sim.on("end", () => { stateRef.current.settled = true; });
 
     // ── Edges ──
     const eSel = g.select(".edges").selectAll("line").data(allEdges, d => `${d.source?.id||d.source}-${d.target?.id||d.target}`);
-    eSel.exit().transition().duration(400).attr("stroke-opacity", 0).remove();
+    eSel.exit().transition().duration(600).attr("stroke-opacity", 0).remove();
     const eEnter = eSel.enter().append("line")
-      .attr("stroke", "#4af0b0").attr("stroke-opacity", 0).attr("stroke-width", d => 0.3 + Math.min(d.weight, 4) * 0.2);
-    eEnter.transition().duration(600).attr("stroke-opacity", d => 0.03 + Math.min(d.weight, 4) * 0.03);
+      .attr("stroke", d => {
+        const src = merged.find(n => n.id === (d.source?.id || d.source));
+        return NODE_COLORS[src?.node_type] || "#4af0b0";
+      })
+      .attr("stroke-opacity", 0)
+      .attr("stroke-width", d => 0.2 + Math.min(d.weight, 4) * 0.15);
+    eEnter.transition().duration(1000).attr("stroke-opacity", d => 0.02 + Math.min(d.weight, 4) * 0.025);
     const allE = eEnter.merge(eSel);
 
     // ── Nodes ──
     const nSel = g.select(".nodes").selectAll("g.node").data(merged, d => d.id);
-    nSel.exit().transition().duration(400).attr("opacity", 0).remove();
+    nSel.exit().transition().duration(600).attr("opacity", 0).remove();
 
     const nEnter = nSel.enter().append("g").attr("class", "node").attr("cursor", "pointer").attr("opacity", 0);
-    nEnter.transition().duration(600).delay((_, i) => i * 20).attr("opacity", 1);
+    nEnter.transition().duration(800).delay((_, i) => Math.min(i * 25, 500)).attr("opacity", 1);
 
-    // Circle — size varies by confidence
-    nEnter.append("circle").attr("class", "dot")
-      .attr("r", d => 5 + (d.confidence || 0.5) * 18)
+    // Outer glow circle
+    nEnter.append("circle").attr("class", "glow-ring")
+      .attr("r", d => nodeRadius(d) * 1.8)
       .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
-      .attr("opacity", d => 0.15 + (d.confidence || 0.5) * 0.45)
+      .attr("opacity", d => 0.03 + (d.confidence || 0.5) * 0.04)
       .attr("filter", "url(#glow)");
 
-    // Tiny inner bright dot
-    nEnter.append("circle")
-      .attr("r", d => 2 + (d.confidence || 0.5) * 4)
+    // Main blob
+    nEnter.append("circle").attr("class", "dot")
+      .attr("r", d => nodeRadius(d))
       .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
-      .attr("opacity", 0.9);
+      .attr("opacity", d => 0.2 + (d.confidence || 0.5) * 0.4)
+      .attr("filter", "url(#glow-soft)");
+
+    // Bright center
+    nEnter.append("circle").attr("class", "core")
+      .attr("r", d => Math.max(1.5, nodeRadius(d) * 0.25))
+      .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
+      .attr("opacity", 0.85);
 
     const allN = nEnter.merge(nSel);
 
-    // Hover — show label on hover only
+    // Hover
     allN
       .on("mouseenter", function(_, d) {
-        d3.select(this).select(".dot").transition().duration(150)
-          .attr("opacity", 0.7).attr("r", 8 + (d.confidence || 0.5) * 20);
+        const r = nodeRadius(d);
+        d3.select(this).select(".dot").transition().duration(200)
+          .attr("opacity", 0.7).attr("r", r * 1.3);
+        d3.select(this).select(".glow-ring").transition().duration(200)
+          .attr("opacity", 0.12);
 
-        // Show tooltip
-        const existing = g.select(".tooltip");
-        if (!existing.empty()) existing.remove();
+        g.select(".tooltip").remove();
+        const tip = g.append("g").attr("class", "tooltip")
+          .attr("transform", `translate(${d.x},${d.y})`)
+          .attr("opacity", 0);
+        tip.transition().duration(200).attr("opacity", 1);
 
-        const tip = g.append("g").attr("class", "tooltip").attr("transform", `translate(${d.x},${d.y})`);
-
-        // Background rect
         const text = d.statement || "";
-        const short = text.length > 50 ? text.slice(0, 50) + "..." : text;
+        const short = text.length > 55 ? text.slice(0, 55) + "..." : text;
         const type = (d.node_type || "").toUpperCase();
         const conf = Math.round((d.confidence || 0) * 100) + "%";
+        const boxW = Math.max(short.length * 5.8, 100);
+        const offset = r * 1.4 + 8;
 
         tip.append("rect")
-          .attr("x", 20).attr("y", -24)
-          .attr("width", Math.max(short.length * 5.5, 120)).attr("height", 38)
-          .attr("rx", 4)
-          .attr("fill", "rgba(10,14,20,0.92)")
+          .attr("x", offset).attr("y", -20)
+          .attr("width", boxW).attr("height", 32)
+          .attr("rx", 6)
+          .attr("fill", "rgba(8,12,18,0.94)")
           .attr("stroke", NODE_COLORS[d.node_type] || "#4af0b0")
-          .attr("stroke-opacity", 0.3)
-          .attr("stroke-width", 0.5);
+          .attr("stroke-opacity", 0.25).attr("stroke-width", 0.5);
 
         tip.append("text")
-          .attr("x", 26).attr("y", -8)
-          .attr("fill", "#e0e4ea").attr("font-size", "10px")
+          .attr("x", offset + 8).attr("y", -4)
+          .attr("fill", "#dde2ea").attr("font-size", "9.5px")
           .attr("font-family", "Inter, system-ui, sans-serif")
           .text(short);
 
         tip.append("text")
-          .attr("x", 26).attr("y", 6)
+          .attr("x", offset + 8).attr("y", 9)
           .attr("fill", NODE_COLORS[d.node_type] || "#4af0b0")
-          .attr("font-size", "8px").attr("opacity", 0.6)
+          .attr("font-size", "7px").attr("opacity", 0.5)
           .attr("font-family", "Inter, system-ui, sans-serif")
           .text(`${type}  ·  ${conf}`);
 
-        // Highlight edges
-        allE.transition().duration(150).attr("stroke-opacity", e => {
+        allE.transition().duration(200).attr("stroke-opacity", e => {
           const s = e.source?.id || e.source, t = e.target?.id || e.target;
-          return (s === d.id || t === d.id) ? 0.4 : 0.01;
+          return (s === d.id || t === d.id) ? 0.35 : 0.005;
         }).attr("stroke-width", e => {
           const s = e.source?.id || e.source, t = e.target?.id || e.target;
-          return (s === d.id || t === d.id) ? 1.5 : 0.3;
+          return (s === d.id || t === d.id) ? 1.2 : 0.2;
         });
       })
       .on("mouseleave", function(_, d) {
-        d3.select(this).select(".dot").transition().duration(300)
-          .attr("opacity", 0.15 + (d.confidence || 0.5) * 0.45)
-          .attr("r", 5 + (d.confidence || 0.5) * 18);
-        g.select(".tooltip").remove();
-        allE.transition().duration(300)
-          .attr("stroke-opacity", e => 0.03 + Math.min(e.weight, 4) * 0.03)
-          .attr("stroke-width", e => 0.3 + Math.min(e.weight, 4) * 0.2);
+        const r = nodeRadius(d);
+        d3.select(this).select(".dot").transition().duration(400)
+          .attr("opacity", 0.2 + (d.confidence || 0.5) * 0.4).attr("r", r);
+        d3.select(this).select(".glow-ring").transition().duration(400)
+          .attr("opacity", 0.03 + (d.confidence || 0.5) * 0.04);
+        g.select(".tooltip").transition().duration(200).attr("opacity", 0).remove();
+        allE.transition().duration(400)
+          .attr("stroke-opacity", e => 0.02 + Math.min(e.weight, 4) * 0.025)
+          .attr("stroke-width", e => 0.2 + Math.min(e.weight, 4) * 0.15);
       });
 
     // Drag
     allN.call(d3.drag()
-      .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.03).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("start", (e, d) => {
+        stateRef.current.settled = false;
+        if (!e.active) sim.alphaTarget(0.02).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
       .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
       .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
     );
 
-    // Click
     allN.on("click", (e, d) => { e.stopPropagation(); onNodeClick && onNodeClick(d); });
 
-    // Tick
+    // Smooth tick with requestAnimationFrame
     sim.on("tick", () => {
       allE.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
         .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
       allN.attr("transform", d => `translate(${d.x},${d.y})`);
-      // Update tooltip position if visible
-      const tip = g.select(".tooltip");
-      if (!tip.empty()) {
-        const tipData = tip.datum();
-        if (tipData) tip.attr("transform", `translate(${tipData.x},${tipData.y})`);
-      }
     });
 
   }, [nodes, links, onNodeClick]);
