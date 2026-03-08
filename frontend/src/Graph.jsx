@@ -246,15 +246,14 @@ export default function Graph({ nodes, links, onNodeClick }) {
     // Type tag
     nodeEnter.append("text")
       .attr("class", "tag")
-      .text(d => d.node_type || "")
+      .text(d => (d.node_type || "").toUpperCase())
       .attr("x", d => 14 + (d.confidence || 0.5) * 10)
       .attr("y", 14)
       .attr("fill", d => NODE_COLORS[d.node_type] || "#4af0b0")
       .attr("font-size", "8px")
       .attr("font-family", "'Inter', sans-serif")
       .attr("opacity", 0.5)
-      .attr("pointer-events", "none")
-      .attr("text-transform", "uppercase");
+      .attr("pointer-events", "none");
 
     const allNodes = nodeEnter.merge(nodeSel);
 
@@ -329,7 +328,7 @@ export default function Graph({ nodes, links, onNodeClick }) {
       style={{
         position: "absolute", top: 0, left: 0,
         width: "100vw", height: "100vh",
-        background: "radial-gradient(ellipse at center, #0f1318 0%, #0a0e14 100%)",
+        background: "#0a0e14",
       }}
     />
   );
