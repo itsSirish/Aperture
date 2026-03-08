@@ -39,8 +39,34 @@ function nodeRadius(d) {
   return base * (0.5 + (d.confidence || 0.5) * 1.0);
 }
 
-function buildEdges(nodes) {
+function deduplicateNodes(rawNodes) {
+  // Keep only one node per statement+node_type, highest confidence wins
+  const seen = new Map();
+  for (const n of rawNodes) {
+    const key = `${n.node_type}::${n.statement}`;
+    const existing = seen.get(key);
+    if (!existing || (n.confidence || 0) > (existing.confidence || 0)) {
+      seen.set(key, n);
+    }
+  }
+  return Array.from(seen.values());
+}
+
+function buildEdges(nodes, firestoreLinks) {
   const edges = [];
+  const idToIdx = new Map();
+  nodes.forEach((n, i) => idToIdx.set(n.id, i));
+
+  // 1. Use real edges from Firestore
+  for (const link of firestoreLinks) {
+    const si = idToIdx.get(link.source);
+    const ti = idToIdx.get(link.target);
+    if (si !== undefined && ti !== undefined) {
+      edges.push({ source: si, target: ti, weight: 2 });
+    }
+  }
+
+  // 2. Connect nodes within same cluster that share keywords
   const stop = new Set(["user","is","the","a","an","and","or","for","to","in","on","of","with","are","has","been","was","actively","working","using","currently","likely","potentially","related"]);
   const nw = nodes.map(n => {
     const w = (n.statement||"").toLowerCase().split(/\s+/).filter(x => x.length > 3 && !stop.has(x));
@@ -50,7 +76,7 @@ function buildEdges(nodes) {
     for (let j = i + 1; j < nodes.length; j++) {
       let s = 0;
       for (const w of nw[i]) if (nw[j].has(w)) s++;
-      if (s >= 1 && (typeToCluster[nodes[i].node_type] === typeToCluster[nodes[j].node_type])) {
+      if (s >= 2 && (typeToCluster[nodes[i].node_type] === typeToCluster[nodes[j].node_type])) {
         edges.push({ source: i, target: j, weight: s });
       }
     }
@@ -203,11 +229,14 @@ export default function Graph({ nodes, links, onNodeClick }) {
     canvas.style.width = w + "px";
     canvas.style.height = h + "px";
 
+    // Deduplicate nodes client-side
+    const dedupedNodes = deduplicateNodes(nodes);
+
     // Merge nodes — preserve positions
     const oldMap = new Map(stateRef.current.nodes.map(n => [n.id, n]));
-    const hasNew = nodes.some(n => !oldMap.has(n.id));
+    const hasNew = dedupedNodes.some(n => !oldMap.has(n.id));
 
-    const merged = nodes.map(n => {
+    const merged = dedupedNodes.map(n => {
       const old = oldMap.get(n.id);
       if (old) return { ...n, x: old.x, y: old.y, vx: 0, vy: 0 };
       const cid = typeToCluster[n.node_type] ?? 3;
@@ -224,7 +253,7 @@ export default function Graph({ nodes, links, onNodeClick }) {
       return;
     }
 
-    const edges = buildEdges(merged);
+    const edges = buildEdges(merged, links);
     stateRef.current.nodes = merged;
     stateRef.current.edges = edges;
     stateRef.current.settled = false;

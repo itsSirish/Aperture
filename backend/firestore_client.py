@@ -1,6 +1,7 @@
 from google.cloud import firestore
 from google.cloud.firestore import AsyncClient
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta
 
@@ -13,63 +14,55 @@ class FirestoreClient:
         self.profile_doc = self.db.collection("meta").document("profile")
         self.sessions_col = self.db.collection("sessions")
 
+    def _belief_id(self, statement: str, node_type: str) -> str:
+        """Deterministic ID from statement+type — guarantees dedup without queries."""
+        raw = f"{node_type}::{statement}".encode()
+        return hashlib.sha256(raw).hexdigest()[:20]
+
+    def _edge_id(self, source: str, target: str, relationship: str) -> str:
+        raw = f"{source}::{target}::{relationship}".encode()
+        return hashlib.sha256(raw).hexdigest()[:20]
+
     async def add_belief(
         self, statement: str, confidence: float, evidence: list, node_type: str
     ) -> str:
-        """Upsert: if a belief with the same statement+node_type exists, update it instead."""
-        existing = (
-            await self.beliefs_col
-            .where("statement", "==", statement)
-            .where("node_type", "==", node_type)
-            .limit(1)
-            .get()
-        )
-        if existing:
-            doc = existing[0]
+        """Upsert using deterministic doc ID — same statement+type always same doc."""
+        doc_id = self._belief_id(statement, node_type)
+        ref = self.beliefs_col.document(doc_id)
+        doc = await ref.get()
+        if doc.exists:
             old_data = doc.to_dict()
-            # Merge evidence, bump confidence
-            merged_evidence = list(set((old_data.get("evidence") or []) + evidence))
+            merged_evidence = list(set((old_data.get("evidence") or []) + evidence))[:10]
             new_confidence = min(1.0, max(confidence, old_data.get("confidence", 0)))
-            await doc.reference.update({
+            await ref.update({
                 "confidence": new_confidence,
                 "evidence": merged_evidence,
                 "updated_at": firestore.SERVER_TIMESTAMP,
             })
-            return doc.id
         else:
-            ref = self.beliefs_col.document()
-            await ref.set(
-                {
-                    "statement": statement,
-                    "confidence": confidence,
-                    "evidence": evidence,
-                    "node_type": node_type,
-                    "created_at": firestore.SERVER_TIMESTAMP,
-                    "session_id": self._current_session_id(),
-                }
-            )
-            return ref.id
+            await ref.set({
+                "statement": statement,
+                "confidence": confidence,
+                "evidence": evidence,
+                "node_type": node_type,
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "session_id": self._current_session_id(),
+            })
+        return doc_id
 
     async def add_edge(self, source: str, target: str, relationship: str):
-        """Upsert edge: skip if same source→target→relationship already exists."""
-        existing = (
-            await self.edges_col
-            .where("source", "==", source)
-            .where("target", "==", target)
-            .where("relationship", "==", relationship)
-            .limit(1)
-            .get()
-        )
-        if existing:
-            return  # edge already exists
-        await self.edges_col.add(
-            {
-                "source": source,
-                "target": target,
-                "relationship": relationship,
-                "created_at": firestore.SERVER_TIMESTAMP,
-            }
-        )
+        """Upsert edge using deterministic doc ID."""
+        doc_id = self._edge_id(source, target, relationship)
+        ref = self.edges_col.document(doc_id)
+        doc = await ref.get()
+        if doc.exists:
+            return
+        await ref.set({
+            "source": source,
+            "target": target,
+            "relationship": relationship,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        })
 
     async def get_belief_graph(self) -> dict:
         """Returns nodes and edges for D3 rendering."""
