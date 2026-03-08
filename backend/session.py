@@ -168,7 +168,7 @@ class CortexSession:
         while self.running:
             try:
                 async with self.client.aio.live.connect(
-                    model="gemini-2.0-flash-live-001", config=config
+                    model="gemini-2.0-flash-exp", config=config
                 ) as live:
                     self.live_session = live
                     print("[CortexSession] Gemini Live connected")
